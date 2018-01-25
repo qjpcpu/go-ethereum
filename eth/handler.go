@@ -208,14 +208,18 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 	// broadcast transactions
 	pm.txCh = make(chan core.TxPreEvent, txChanSize)
 	pm.txSub = pm.txpool.SubscribeTxPreEvent(pm.txCh)
+	// 广播新出现的交易对象. txBroadcastLoop()会在txCh通道的收端持续等待，一旦接收到有关新交易的事件，会立即调用BroadcastTx()函数广播给那些尚无该交易对象的相邻个体
 	go pm.txBroadcastLoop()
 
 	// broadcast mined blocks
 	pm.minedBlockSub = pm.eventMux.Subscribe(core.NewMinedBlockEvent{})
+	// 广播新挖掘出的区块。minedBroadcastLoop()持续等待本个体的新挖掘出区块事件，然后立即广播给需要的相邻个体。当不再订阅新挖掘区块事件时，这个函数才会结束等待并返回。很有意思的是,在收到新挖掘出区块事件后，minedBroadcastLoop()会连续调用两次BroadcastBlock()，两次调用仅仅一个bool型参数@propagate不一样，当该参数为true时，会将整个新区块依次发给相邻区块中的一小部分；而当其为false时，仅仅将新区块的Hash值和Number发送给所有相邻列表
 	go pm.minedBroadcastLoop()
 
 	// start sync handlers
+	// 定时与相邻个体进行区块全链的强制同步。syncer()首先启动fetcher成员，然后进入一个无限循环，每次循环中都会向相邻peer列表中“最优”的那个peer作一次区块全链同步。发起上述同步的理由分两种：如果有新登记(加入)的相邻个体，则在整个peer列表数目大于5时，发起之；如果没有新peer到达，则以10s为间隔定时的发起之。这里所谓"最优"指的是peer中所维护区块链的TotalDifficulty(td)最高，由于Td是全链中从创世块到最新头块的Difficulty值总和，所以Td值最高就意味着它的区块链是最新的，跟这样的peer作区块全链同步，显然改动量是最小的，此即"最优"
 	go pm.syncer()
+	// 将新出现的交易对象均匀的同步给相邻个体。txsyncLoop()主体也是一个无限循环，它的逻辑稍微复杂一些：首先有一个数据类型txsync{p, txs},包含peer和tx列表；通道txsyncCh用来接收txsync{}对象；txsyncLoop()每次循环时，如果从通道txsyncCh中收到新数据，则将它存入一个本地map[]结构，k为peer.ID，v为txsync{}，并将这组tx对象发送给这个peer；每次向peer发送tx对象的上限数目100*1024，如果txsync{}对象中有剩余tx，则该txsync{}对象继续存入map[]并更新tx数目；如果本次循环没有新到达txsync{},则从map[]结构中随机找出一个txsync对象，将其中的tx组发送给相应的peer，重复以上循环
 	go pm.txsyncLoop()
 }
 
